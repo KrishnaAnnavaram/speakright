@@ -9,7 +9,7 @@
 ![Languages](https://img.shields.io/badge/Languages-English_%2B_Mandarin-1F3864?style=for-the-badge)
 ![Error types](https://img.shields.io/badge/Error_types-24-2E5FD9?style=for-the-badge)
 ![CLI commands](https://img.shields.io/badge/CLI_commands-9-6E86E8?style=for-the-badge)
-![Tests](https://img.shields.io/badge/Tests-45_passing-3DA35B?style=for-the-badge)
+![Tests](https://img.shields.io/badge/Tests-44_passing-3DA35B?style=for-the-badge)
 ![Offline demo](https://img.shields.io/badge/Offline_demo-Yes-F5C542?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-A0399B?style=for-the-badge)
 
@@ -104,7 +104,7 @@ speakright gives each of these questions its own component. Each component has a
 | Recognisers | `CtcPhoneRecognizer` (wav2vec2 phoneme CTC, extra `recognizer`), `ScriptedRecognizer` (typed or simulated units) |
 | Offline mode | Typed units, simulated learners, synthetic tone audio, pitch-based tones and rule tips. No key and no network |
 | Safety | No recording kept by default, deterministic score, LLM output validated and never used for the score |
-| Tests | **46** unit tests (`pytest`): 45 pass locally, 44 pass and 2 skip in CI |
+| Tests | **44** pass in CI (`.[dev]` only) and 2 skip (`ui` and `g2p` extras). With Streamlit, 45 pass and 1 skips |
 
 ```mermaid
 flowchart LR
@@ -460,8 +460,7 @@ Planned milestones (not built):
 
 | Validation | Result | Command |
 |---|---|---|
-| Unit tests (local, with Streamlit) | **45 passed, 1 skipped** (pypinyin not installed) | `pytest -q` |
-| Unit tests (CI simulation, clean venv, `.[dev]` only) | **44 passed, 2 skipped** | `pip install -e ".[dev]"`, `pytest -q` |
+| Unit tests | CI installs only `.[dev]`: **44 passed**, 2 skipped (`ui` extra, `g2p` extra). With Streamlit: 45 passed, 1 skipped (pypinyin) | `pip install -e ".[dev]"`, `pytest -q` |
 | English phone-error detection, 200 simulated utterances | Precision 0.781, recall 0.969, F1 **0.865** | `speakright demo` |
 | English word-level detection, speakright | Precision 0.812, recall 1.000, F1 **0.896** | `speakright demo` |
 | English word-level detection, old word method | Precision 1.000, recall 0.141, F1 **0.248** | `speakright demo` |
