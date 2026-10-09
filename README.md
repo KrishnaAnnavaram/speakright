@@ -68,6 +68,7 @@ This README is the **one location that explains all of speakright**. It gives th
 4. 🔄 [The end-to-end workflow](#4-the-end-to-end-workflow)
    - 4.1 [Full flow](#41-full-flow)
    - 4.2 [The life cycle of one assessment](#42-the-life-cycle-of-one-assessment)
+   - 4.3 [Who does which step](#43-who-does-which-step)
 5. 🔵 [Canonical units: G2P and pinyin](#5-canonical-units-g2p-and-pinyin)
 6. 🟢 [Audio, recognition and pitch](#6-audio-recognition-and-pitch)
 7. 🟣 [Alignment, error types and feedback](#7-alignment-error-types-and-feedback)
@@ -101,7 +102,7 @@ speakright gives each of these questions its own component. Each component has a
 | Input | A target text (English words, Chinese characters or pinyin), a WAV recording, typed heard units, or both |
 | Output | An `Assessment`: canonical and heard units, alignment operations, error list, score 0 to 100, band, tips and notes |
 | Components | **14** modules: phones, g2p_en, pinyin, audio, pitch, recognize, align, taxonomy, scoring, llm, assess, simulate, evaluate, privacy (plus config, samples, cli, ui) |
-| Recognisers | `CtcPhoneRecognizer` (wav2vec2 phoneme CTC, extra `recognizer`), `ScriptedRecognizer` (typed or simulated units) |
+| Recognisers | `CtcPhoneRecognizer` (wav2vec2 phoneme CTC, extra `recognizer`), `ScriptedRecognizer` (tests). Typed and simulated units go directly into a `Recognition` |
 | Offline mode | Typed units, simulated learners, synthetic tone audio, pitch-based tones and rule tips. No key and no network |
 | Safety | No recording kept by default, deterministic score, LLM output validated and never used for the score |
 | Tests | **44** pass in CI (`.[dev]` only) and 2 skip (`ui` and `g2p` extras). With Streamlit, 45 pass and 1 skips |
@@ -137,6 +138,65 @@ flowchart LR
 | Samples | `src/speakright/samples.py` | 8 English and 10 Mandarin practice sentences |
 | CLI | `src/speakright/cli.py` | The `speakright` command with 9 subcommands |
 | Browser UI | `src/speakright/ui/streamlit_app.py` | Browser recording with `st.audio_input` (extra `ui`) |
+
+The component map shows which module calls which module. An arrow points from the caller to the module that it uses.
+
+```mermaid
+flowchart TB
+    subgraph ENTRY["Entry points"]
+        CLI["cli.py<br/>speakright command"]
+        UI["ui/streamlit_app.py<br/>browser UI"]
+    end
+    subgraph UNITS["Canonical units"]
+        G2P["g2p_en.py<br/>EnglishG2P"]
+        PY["pinyin.py<br/>target_syllables, apply_sandhi"]
+        PH["phones.py<br/>ARPAbet, IPA_TO_ARPA"]
+    end
+    subgraph HEARD["Audio and heard units"]
+        AUD["audio.py<br/>prepare"]
+        REC["recognize.py<br/>CtcPhoneRecognizer"]
+        PIT["pitch.py<br/>tones_from_audio"]
+    end
+    subgraph CORE["Assessment"]
+        AS["assess.py<br/>Assessor"]
+        AL["align.py<br/>align, error_rate"]
+        TAX["taxonomy.py<br/>error types, TIPS"]
+        SC["scoring.py<br/>english_score, mandarin_score"]
+        LLM["llm.py<br/>build_llm, parse_tips"]
+    end
+    subgraph EVAL["Evaluation"]
+        EV["evaluate.py<br/>synthetic and speechocean762"]
+        SIM["simulate.py<br/>simulated learners"]
+    end
+    PRIV["privacy.py<br/>store, purge"]
+    CFG["config.py<br/>Settings"]
+
+    CLI --> CFG
+    CLI --> AUD
+    CLI --> REC
+    CLI --> AS
+    CLI --> PRIV
+    CLI --> EV
+    UI --> CFG
+    UI --> AUD
+    UI --> REC
+    UI --> AS
+    UI --> PRIV
+    AS --> G2P
+    AS --> PY
+    AS --> PIT
+    AS --> AL
+    AS --> TAX
+    AS --> SC
+    AS --> LLM
+    EV --> AS
+    EV --> SIM
+    EV --> PIT
+    REC --> PH
+    G2P --> PH
+    AL --> PH
+    PRIV --> AUD
+```
 
 ### 2.2 System context
 
@@ -177,6 +237,18 @@ speakright/
 ### 3.1 Errors come from the heard phones
 The recogniser gives phones, not words. A word recogniser maps an accented word to the correct word, so a word compare misses most errors. The evaluation in section 12 measures this difference.
 
+```mermaid
+flowchart LR
+    AUD[/"Learner says TH as T"/] --> PHR["Phone recogniser<br/>CtcPhoneRecognizer"]
+    PHR --> HP["Heard phones<br/>T R IY ..."]
+    HP --> AL["align with the<br/>canonical phones"]
+    AL --> FOUND[/"th-stopping found"/]
+    AUD --> WR["Old word method<br/>legacy_word_flags in simulate.py"]
+    WR --> LM["Language model returns<br/>the target word"]
+    LM --> CMP["Compare dictionary<br/>pronunciations"]
+    CMP --> MISS[/"Error missed"/]
+```
+
 ### 3.2 Both sides use one format
 English uses ARPAbet without stress marks on both sides. Mandarin uses TONE3 pinyin on both sides. Characters, traditional characters, diacritic pinyin and TONE3 pinyin all change to the same syllables.
 
@@ -202,13 +274,13 @@ For Mandarin, `pitch.py` measures the F0 contour of each syllable and classifies
 ### 4.1 Full flow
 
 ```mermaid
-flowchart TB
-    T["Target text"] --> LANG{"Language"}
+flowchart TD
+    T[/"Target text"/] --> LANG{"Language"}
     LANG -- "en" --> G2P["EnglishG2P: ARPAbet for each word"]
     LANG -- "zh" --> PY["target_syllables, then apply_sandhi"]
-    W["WAV or browser clip"] --> PREP["prepare: 16 kHz, VAD, checks"]
+    W[/"WAV or browser clip"/] --> PREP["prepare: 16 kHz, VAD, checks"]
     PREP --> REC["CtcPhoneRecognizer (en)"]
-    TYPED["Typed heard units"] --> SCR["ScriptedRecognizer"]
+    TYPED[/"Typed heard units --phones"/] --> SCR["Recognition from the typed units"]
     PREP --> F0["tones_from_audio (zh)"]
     G2P --> AL["align"]
     REC --> AL
@@ -217,26 +289,136 @@ flowchart TB
     F0 --> AL
     AL --> TAX["Error types"]
     TAX --> SC["Score formula"]
-    SC --> TIPS["Rule tips, or one LLM call"]
-    TIPS --> OUT["Assessment: JSON or Markdown"]
+    SC --> TIPS{"LLM configured<br/>and errors found?"}
+    TIPS -- "no" --> RT["Rule tips"]
+    TIPS -- "yes" --> LLM["One LLM call,<br/>rule tips if it fails"]
+    RT --> OUT[/"Assessment: JSON or Markdown"/]
+    LLM --> OUT
+    OUT --> KEEP{"Audio given and<br/>SPEAKRIGHT_STORE_AUDIO=yes?"}
+    KEEP -- "yes" --> STORE[("artifacts/audio/<br/>rec-random.wav")]
+    OUT --> HUMAN{{"HUMAN<br/>learner or teacher checks the feedback"}}
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class HUMAN human
 ```
 
 ### 4.2 The life cycle of one assessment
 
+```mermaid
+stateDiagram-v2
+    state "Request" as Req
+    state "Heard units" as Heard
+    state "Aligned units" as Aligned
+    state "Error list" as Classified
+    state "Scored" as Scored
+    state "Rule tips, tip_source rules" as RuleTips
+    state "LLM tips, tip_source llm" as LlmTips
+    state "Recording stored" as Stored
+    state "Report printed" as Printed
+    [*] --> Req: learner gives language, target, audio or typed units
+    Req --> Rejected: AudioError, AssessError, G2PError or PinyinError
+    Req --> Heard: Recognition from the recogniser or the keyboard
+    Heard --> Aligned: canonical units, then align
+    Aligned --> Classified: classify_english or classify_mandarin_parts
+    Classified --> Scored: english_score or mandarin_score, band
+    Scored --> RuleTips: rule_tips
+    RuleTips --> LlmTips: LLM configured, errors found, reply valid
+    RuleTips --> Stored: audio given and store enabled
+    LlmTips --> Stored: audio given and store enabled
+    RuleTips --> Printed: no recording kept
+    LlmTips --> Printed: no recording kept
+    Stored --> Printed
+    Printed --> [*]
+    Rejected --> [*]
+```
+
 1. The learner selects a language and a target text, then records or types the heard units.
 2. `prepare` resamples the audio to 16 kHz, trims silence and checks length, level and clipping.
 3. For English, the recogniser gives ARPAbet phones with a confidence for each phone.
-4. For Mandarin, the heard syllables come from the recogniser or the keyboard, and the tones come from the pitch.
+4. For Mandarin, the heard syllables come from the keyboard (`--phones` or the UI text field), and the tones come from the pitch. No Mandarin recogniser is included.
 5. The canonical units come from the G2P (English) or from pinyin with sandhi (Mandarin).
 6. `align` pairs the two sequences. Each difference becomes an error with a type and a word.
 7. The score formula gives a value from 0 to 100 and a band.
 8. The tips come from the error types, or from one validated LLM reply.
+
+### 4.3 Who does which step
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor L as Learner
+    participant CLI as speakright CLI
+    participant AUD as audio.py
+    participant REC as CtcPhoneRecognizer
+    participant AS as Assessor
+    participant LLM as OpenAI-compatible LLM
+    participant FS as artifacts/audio
+
+    L->>CLI: speakright assess --text three thin thieves --audio rec.wav
+    CLI->>CLI: Settings.from_env
+    CLI->>AUD: prepare(rec.wav)
+    AUD-->>CLI: 16 kHz samples, AudioCheck
+    CLI->>REC: get_recognizer, then recognize(audio, 16000)
+    REC-->>CLI: Recognition with ARPAbet phones and confidences
+    CLI->>AS: assess(en, text, rec, audio)
+    AS->>AS: EnglishG2P.sentence, align, classify_english
+    AS->>AS: english_score, rule_tips
+    opt LLM configured and errors found
+        AS->>LLM: POST /chat/completions, one call
+        LLM-->>AS: JSON with tips
+        AS->>AS: parse_tips, or keep the rule tips
+    end
+    AS-->>CLI: Assessment
+    CLI->>FS: privacy.store, only with SPEAKRIGHT_STORE_AUDIO=yes
+    CLI-->>L: Markdown report, or JSON with --json
+```
 
 ---
 
 ## 5. Canonical units: G2P and pinyin
 
 **Purpose.** Give the expected units of the target text in one canonical format.
+
+The first diagram shows the English G2P for each word.
+
+```mermaid
+flowchart TD
+    IN[/"English target text"/] --> W["words_of: lower case,<br/>split into words"]
+    W --> NW{"No word?"}
+    NW -- "yes" --> ERR[/"G2PError"/]
+    NW -- "no" --> CMU{"Word in CMUdict?<br/>SPEAKRIGHT_CMUDICT or cmudict"}
+    CMU -- "yes" --> SC["source cmudict"]
+    CMU -- "no" --> LEX{"Word in BUILTIN_LEXICON?<br/>62 words"}
+    LEX -- "yes" --> SB["source builtin"]
+    LEX -- "no" --> RUL{"allow_rules?"}
+    RUL -- "no" --> ERR
+    RUL -- "yes" --> LTS["letter_to_sound<br/>approximate=True, source rules"]
+    SC --> CHK{"Each phone in<br/>the ARPAbet set?"}
+    SB --> CHK
+    LTS --> CHK
+    CHK -- "no" --> ERR
+    CHK -- "yes" --> OUT[/"WordPhones for each word"/]
+```
+
+The second diagram shows the Mandarin units.
+
+```mermaid
+flowchart TD
+    IN[/"Target text: characters,<br/>diacritic or TONE3 pinyin"/] --> H{"Has a Chinese character?"}
+    H -- "no" --> PP["parse_pinyin: split,<br/>to_tone3 for each syllable"]
+    H -- "yes" --> TS["TRAD_TO_SIMP,<br/>keep only the characters"]
+    TS --> PYP{"pypinyin installed<br/>and gives syllables?"}
+    PYP -- "yes" --> LP["lazy_pinyin, Style.TONE3"]
+    PYP -- "no" --> TAB["Built-in table:<br/>5 WORDS, then 39 CHARS"]
+    TAB --> MISS{"Character not<br/>in the table?"}
+    MISS -- "yes" --> ERR[/"PinyinError"/]
+    MISS -- "no" --> RAW["TONE3 syllables<br/>before sandhi"]
+    LP --> RAW
+    PP --> RAW
+    RAW --> SAN["apply_sandhi: 不 and 一 rules,<br/>3-3 to 2-3, right to left"]
+    SAN --> SPL["split_syllable:<br/>initial, final, tone"]
+    SPL --> OUT[/"Canonical Syllable list"/]
+```
 
 | Input | Output |
 |---|---|
@@ -257,6 +439,57 @@ flowchart TB
 ## 6. Audio, recognition and pitch
 
 **Purpose.** Change a recording into heard units and Mandarin tones.
+
+The first diagram shows `audio.prepare`.
+
+```mermaid
+flowchart TD
+    IN[/"WAV file or browser bytes"/] --> RD["read_wav: stdlib wave"]
+    RD --> FMT{"Readable, and PCM<br/>8, 16 or 32 bit?"}
+    FMT -- "no" --> ERR[/"AudioError"/]
+    FMT -- "yes" --> MONO["Average the channels<br/>to mono float32"]
+    MONO --> RS["to_16k: resample_poly"]
+    RS --> VAD["vad_trim: cut leading and trailing frames<br/>30 dB below the loudest, pad 0.1 s"]
+    VAD --> CK["check: duration, RMS level,<br/>clipped fraction"]
+    CK --> PB{"Shorter than 0.3 s, longer than 30 s,<br/>below -45 dBFS or over 1 % clipped?"}
+    PB -- "yes" --> ERR
+    PB -- "no" --> OUT[/"16 kHz samples and AudioCheck"/]
+```
+
+The second diagram shows the English phone recogniser.
+
+```mermaid
+flowchart LR
+    CFG[/"SPEAKRIGHT_RECOGNIZER_MODEL<br/>SPEAKRIGHT_DEVICE"/] --> GR["get_recognizer<br/>lru_cache, loads once"]
+    GR --> MOD["AutoProcessor and<br/>AutoModelForCTC"]
+    AUD[/"16 kHz samples"/] --> LOG["CTC logits, softmax"]
+    MOD --> LOG
+    LOG --> GD["Greedy decode: best class per frame,<br/>join repeats, drop pad"]
+    GD --> CONF["Confidence: mean top-class<br/>posterior over the frames"]
+    CONF --> MAP{"ipa_to_arpabet:<br/>symbol mapped?"}
+    MAP -- "yes" --> PH["ARPAbet phones"]
+    MAP -- "no" --> DROP["dropped + 1"]
+    PH --> OUT[/"Recognition: phones,<br/>confidences, dropped"/]
+    DROP --> OUT
+```
+
+The third diagram shows the Mandarin tones from the pitch.
+
+```mermaid
+flowchart TD
+    IN[/"16 kHz samples and<br/>the number of heard syllables"/] --> F0["f0_track: 40 ms frames, 10 ms hop,<br/>autocorrelation peak 70 to 400 Hz"]
+    F0 --> V{"Any voiced frame?"}
+    V -- "no" --> NONE[/"tone None for each syllable"/]
+    V -- "yes" --> ST["Semitones against<br/>the speaker median"]
+    ST --> SEG["segment_syllables: voiced runs,<br/>join gaps below 3 frames, drop runs below 5"]
+    SEG --> CNT{"Run count equals<br/>the syllable count?"}
+    CNT -- "no" --> EQ["Cut the voiced span<br/>into equal parts"]
+    CNT -- "yes" --> CLS["classify_tone for each segment"]
+    EQ --> CLS
+    CLS --> OUT[/"ToneResult for each syllable"/]
+    NONE --> USE["Assessor.mandarin: the measured tone<br/>replaces the typed tone if not None"]
+    OUT --> USE
+```
 
 | Input | Output |
 |---|---|
@@ -280,6 +513,66 @@ flowchart TB
 ## 7. Alignment, error types and feedback
 
 **Purpose.** Find each difference, give it a name and a tip, and calculate the score.
+
+The first diagram shows the English error types.
+
+```mermaid
+flowchart TD
+    REF[/"Canonical phones<br/>and their words"/] --> AL["align: Needleman-Wunsch,<br/>phone_sub_cost, gap 1.0"]
+    HYP[/"Heard phones"/] --> AL
+    AL --> OP{"Operation"}
+    OP -- "match" --> NOE["No error"]
+    OP -- "sub" --> SUB["EN_SUBS pair,<br/>else substitution"]
+    OP -- "del" --> DEL{"Last phone of the word<br/>and not a vowel?"}
+    DEL -- "yes" --> FCD["final-consonant-deletion"]
+    DEL -- "no" --> PD["phone-deletion"]
+    OP -- "ins" --> INS{"Vowel after<br/>a consonant?"}
+    INS -- "yes" --> VE["vowel-epenthesis"]
+    INS -- "no" --> PI["phone-insertion"]
+    SUB --> ERR[/"ErrorItem: kind, expected,<br/>actual, word"/]
+    FCD --> ERR
+    PD --> ERR
+    VE --> ERR
+    PI --> ERR
+    AL --> PER["error_rate: PER"]
+```
+
+The second diagram shows the Mandarin error types.
+
+```mermaid
+flowchart TD
+    REF[/"Canonical syllables<br/>after sandhi"/] --> AL["align: 0.5 for the initial<br/>+ 0.5 for the final"]
+    HYP[/"Heard syllables with<br/>the tones from the pitch"/] --> AL
+    AL --> OP{"Operation"}
+    OP -- "del" --> SD["syllable-deletion"]
+    OP -- "ins" --> SI["syllable-insertion"]
+    OP -- "match or sub" --> INI{"Initial differs?"}
+    INI -- "yes" --> ZI["ZH_INITIALS pair,<br/>else substitution"]
+    INI -- "no" --> FIN{"Final differs?"}
+    ZI --> FIN
+    FIN -- "yes" --> FE["final-error"]
+    FIN -- "no" --> TON{"Target tone 1 to 4<br/>and heard tone differs?"}
+    FE --> TON
+    TON -- "yes" --> TE["tone-3-as-2, tone-2-as-3<br/>or tone-error"]
+    SD --> ERR[/"ErrorItem list, syllable error rate,<br/>tone accuracy"/]
+    SI --> ERR
+    TON -- "no" --> ERR
+    TE --> ERR
+```
+
+The third diagram shows how `Assessor` gives the tips after the score is final.
+
+```mermaid
+flowchart TD
+    IN[/"ErrorItem list and Score"/] --> RT["rule_tips: one TIPS entry<br/>for each error type, maximum 5"]
+    RT --> Q{"LLM configured<br/>and errors found?"}
+    Q -- "no" --> OUTR[/"Assessment, tip_source rules"/]
+    Q -- "yes" --> CALL["llm.complete: SYSTEM prompt,<br/>score and first 20 errors as JSON"]
+    CALL --> V{"parse_tips: JSON, 1 to 5 tips,<br/>each 1 to 240 characters?"}
+    V -- "yes" --> OUTL[/"Assessment, tip_source llm"/]
+    V -- "no, or any exception" --> NOTE["Keep the rule tips, add the note<br/>LLM tips not used"]
+    NOTE --> OUTR
+```
 
 | Input | Output |
 |---|---|
@@ -307,6 +600,26 @@ flowchart TB
 
 **Scores**
 
+```mermaid
+flowchart TD
+    IN[/"Error rate, confidences,<br/>tone accuracy"/] --> L{"Language"}
+    L -- "en" --> C{"Confidences given?"}
+    C -- "yes" --> E1["0.8 × segment part<br/>+ 0.2 × mean confidence"]
+    C -- "no" --> E2["Segment part only"]
+    L -- "zh" --> T{"Any scored tone?<br/>tone 1 to 4"}
+    T -- "yes" --> Z1["0.6 × segment part<br/>+ 0.4 × tone accuracy"]
+    T -- "no" --> E2
+    E1 --> R["× 100, round to 1 decimal"]
+    E2 --> R
+    Z1 --> R
+    R --> CHK{"Float from 0 to 100?"}
+    CHK -- "no" --> ERR[/"ValueError"/]
+    CHK -- "yes" --> B["band: 90 excellent, 75 good,<br/>50 fair, else needs practice"]
+    B --> OUT[/"Score"/]
+```
+
+Segment part = `1 - min(1, error rate)`. If no target syllable has a tone from 1 to 4, the Mandarin score uses the segment part only.
+
 | Language | Formula |
 |---|---|
 | English, with confidences | `100 x (0.8 x (1 - min(1, PER)) + 0.2 x mean confidence of matched phones)` |
@@ -332,6 +645,22 @@ flowchart TB
 | Mandarin syllables | 0.5 for a different initial + 0.5 for a different final (the tone is compared after the alignment) |
 
 **Tone rules (semitones against the speaker median, contour reduced to 10 points)**
+
+```mermaid
+flowchart TD
+    IN[/"Contour of one syllable<br/>in semitones"/] --> N{"Fewer than 4<br/>voiced points?"}
+    N -- "yes" --> TN[/"tone None"/]
+    N -- "no" --> P["Resample to 10 points,<br/>smooth over 3 points"]
+    P --> D3{"Minimum at 20 to 80 %,<br/>start and end over 1.5 above it?"}
+    D3 -- "yes" --> T3[/"tone 3"/]
+    D3 -- "no" --> R2{"end - start above 2.5?"}
+    R2 -- "yes" --> T2[/"tone 2"/]
+    R2 -- "no" --> F4{"end - start below -2.5?"}
+    F4 -- "yes" --> T4[/"tone 4"/]
+    F4 -- "no" --> M1{"Mean above -1.5?"}
+    M1 -- "yes" --> T1[/"tone 1"/]
+    M1 -- "no" --> T3L[/"tone 3, low and level"/]
+```
 
 | Tone | Rule |
 |---|---|
@@ -418,6 +747,28 @@ speakright eval --speechocean data/speechocean762 --limit 500
 speakright ui                                   # http://localhost:8501
 ```
 
+The diagram shows the order of the commands and the files that connect them.
+
+```mermaid
+flowchart LR
+    INS["pip install -e .[dev]"] --> DEMO["speakright demo"]
+    DEMO --> SUM[("artifacts/demo/<br/>demo_summary.json")]
+    INS --> SYN["speakright synth-tones"]
+    SYN --> WAV[("artifacts/nihao.wav")]
+    WAV --> AZH["speakright assess --lang zh<br/>--phones --audio"]
+    WAV --> TON["speakright tones"]
+    INS --> AEN["speakright assess --phones"]
+    INS --> EVS["speakright eval --n 200"]
+    INS --> EXT["pip install -e .[recognizer,g2p,llm,ui]"]
+    EXT --> AAU["speakright assess --audio"]
+    EXT --> EVO["speakright eval --speechocean"]
+    EXT --> UI["speakright ui"]
+    AAU --> REC[("artifacts/audio/rec-random.wav<br/>only with SPEAKRIGHT_STORE_AUDIO=yes")]
+    UI --> REC
+    AZH --> REC
+    PUR["speakright purge"] --> REC
+```
+
 ### 10.4 Environment variables
 
 | Variable | Used by | Meaning |
@@ -434,6 +785,19 @@ speakright ui                                   # http://localhost:8501
 
 A bad value stops the command with `error:`.
 Credentials are only in a local `.env` file. Git ignores this file. Do not print or commit credentials.
+
+```mermaid
+flowchart LR
+    ENV[/".env file"/] --> LD["load_dotenv"]
+    PENV[/"Process environment"/] --> FE["Settings.from_env:<br/>the process environment wins"]
+    LD --> FE
+    FE --> CHK{"RETENTION_DAYS an integer 0 or more,<br/>STORE_AUDIO yes or no?"}
+    CHK -- "yes" --> SET[/"Settings: model, device, LLM,<br/>store, audio_dir, retention, cmudict"/]
+    CHK -- "no" --> ERR[/"ConfigError: the CLI prints<br/>error: and returns 2"/]
+    SET --> LLMQ{"LLM_BASE_URL and<br/>LLM_MODEL set?"}
+    LLMQ -- "yes" --> LLM["OpenAICompatibleLLM"]
+    LLMQ -- "no" --> NOLLM["No LLM, rule tips only"]
+```
 
 ---
 
@@ -457,6 +821,24 @@ Planned milestones (not built):
 ---
 
 ## 12. Validation results
+
+The diagram shows how the synthetic evaluation (`evaluate.py`, `simulate.py`) makes the numbers in the table.
+
+```mermaid
+flowchart TD
+    EN[/"8 ENGLISH samples, seed 0"/] --> G["EnglishG2P.sentence"]
+    G --> SE["simulate_english:<br/>labelled errors, p_err 0.3"]
+    SE --> NR["noisy_recognizer:<br/>5 % noise, confidences"]
+    NR --> AE["Assessor.english"]
+    AE --> PRF["prf: precision, recall, F1<br/>for phones and words"]
+    SE --> LEG["legacy_word_flags:<br/>LM fixes 85 % of bad words"]
+    LEG --> PRF
+    AE --> PC["pearson with the<br/>synthetic human score"]
+    ZH[/"10 MANDARIN samples, seed 0"/] --> SM["simulate_mandarin:<br/>tone and segment errors"]
+    SM --> ST["synth_tones: hummed audio,<br/>range_scale 1.0 or 0.5"]
+    ST --> AM["Assessor.mandarin with audio"]
+    AM --> TA["Tone accuracy, tone confusion,<br/>tone and segment F1"]
+```
 
 | Validation | Result | Command |
 |---|---|---|
